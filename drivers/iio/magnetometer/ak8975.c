@@ -746,12 +746,14 @@ static const struct iio_mount_matrix *
 ak8975_get_mount_matrix(const struct iio_dev *indio_dev,
 			const struct iio_chan_spec *chan)
 {
-	return &((struct ak8975_data *)iio_priv(indio_dev))->orientation;
+	struct ak8975_data *data = iio_priv(indio_dev);
+
+	return &data->orientation;
 }
 
 static const struct iio_chan_spec_ext_info ak8975_ext_info[] = {
 	IIO_MOUNT_MATRIX(IIO_SHARED_BY_DIR, ak8975_get_mount_matrix),
-	{ },
+	{ }
 };
 
 #define AK8975_CHANNEL(axis, index)					\
@@ -781,18 +783,21 @@ static const unsigned long ak8975_scan_masks[] = { 0x7, 0 };
 
 static const struct iio_info ak8975_info = {
 	.read_raw = &ak8975_read_raw,
-	.driver_module = THIS_MODULE,
 };
 
+#ifdef CONFIG_ACPI
 static const struct acpi_device_id ak_acpi_match[] = {
 	{"AK8975", AK8975},
 	{"AK8963", AK8963},
 	{"INVN6500", AK8963},
+	{"AK009911", AK09911},
 	{"AK09911", AK09911},
+	{"AKM9911", AK09911},
 	{"AK09912", AK09912},
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, ak_acpi_match);
+#endif
 
 static const char *ak8975_match_acpi_device(struct device *dev,
 					    enum asahi_compass_chipset *chipset)
@@ -908,9 +913,8 @@ static int ak8975_probe(struct i2c_client *client,
 	data->eoc_irq = 0;
 
 	if (!pdata) {
-		err = of_iio_read_mount_matrix(&client->dev,
-					       "mount-matrix",
-					       &data->orientation);
+		err = iio_read_mount_matrix(&client->dev, "mount-matrix",
+					    &data->orientation);
 		if (err)
 			return err;
 	} else

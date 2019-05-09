@@ -14,6 +14,8 @@
 #ifndef UFS_QCOM_H_
 #define UFS_QCOM_H_
 
+#include <linux/reset-controller.h>
+
 #define MAX_UFS_QCOM_HOSTS	1
 #define MAX_U32                 (~(u32)0)
 #define MPHY_TX_FSM_STATE       0x41
@@ -92,9 +94,11 @@ enum {
 #define UFS_CNTLR_3_x_x_VEN_REGS_OFFSET(x)	(0x400 + x)
 
 /* bit definitions for REG_UFS_CFG1 register */
-#define QUNIPRO_SEL	UFS_BIT(0)
+#define QUNIPRO_SEL		0x1
+#define UTP_DBG_RAMS_EN		0x20000
 #define TEST_BUS_EN		BIT(18)
 #define TEST_BUS_SEL		GENMASK(22, 19)
+#define UFS_REG_TEST_BUS_EN	BIT(30)
 
 /* bit definitions for REG_UFS_CFG2 register */
 #define UAWM_HW_CGC_EN		(1 << 0)
@@ -125,11 +129,6 @@ enum {
 	MASK_UFS_PHY_SOFT_RESET             = 0x2,
 	MASK_TX_SYMBOL_CLK_1US_REG          = 0x3FF,
 	MASK_CLK_NS_REG                     = 0xFFFC00,
-};
-
-enum ufs_qcom_phy_init_type {
-	UFS_PHY_INIT_FULL,
-	UFS_PHY_INIT_CFG_RESTORE,
 };
 
 /* QCOM UFS debug print bit mask */
@@ -212,13 +211,13 @@ struct ufs_qcom_host {
 	 * Note: By default this capability will be kept enabled if host
 	 * controller supports the QUniPro mode.
 	 */
-	#define UFS_QCOM_CAP_QUNIPRO	UFS_BIT(0)
+	#define UFS_QCOM_CAP_QUNIPRO	0x1
 
 	/*
 	 * Set this capability if host controller can retain the secure
 	 * configuration even after UFS controller core power collapse.
 	 */
-	#define UFS_QCOM_CAP_RETAIN_SEC_CFG_AFTER_PWR_COLLAPSE	UFS_BIT(1)
+	#define UFS_QCOM_CAP_RETAIN_SEC_CFG_AFTER_PWR_COLLAPSE	0x2
 	u32 caps;
 
 	struct phy *generic_phy;
@@ -240,6 +239,8 @@ struct ufs_qcom_host {
 	/* Bitmask for enabling debug prints */
 	u32 dbg_print_en;
 	struct ufs_qcom_testbus testbus;
+
+	struct reset_controller_dev rcdev;
 };
 
 static inline u32

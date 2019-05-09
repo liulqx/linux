@@ -23,9 +23,8 @@ struct nft_range_expr {
 	enum nft_range_ops	op:8;
 };
 
-static void nft_range_eval(const struct nft_expr *expr,
-			 struct nft_regs *regs,
-			 const struct nft_pktinfo *pkt)
+void nft_range_eval(const struct nft_expr *expr,
+		    struct nft_regs *regs, const struct nft_pktinfo *pkt)
 {
 	const struct nft_range_expr *priv = nft_expr_priv(expr);
 	int d1, d2;
@@ -102,9 +101,9 @@ static int nft_range_init(const struct nft_ctx *ctx, const struct nft_expr *expr
 	priv->len = desc_from.len;
 	return 0;
 err2:
-	nft_data_uninit(&priv->data_to, desc_to.type);
+	nft_data_release(&priv->data_to, desc_to.type);
 err1:
-	nft_data_uninit(&priv->data_from, desc_from.type);
+	nft_data_release(&priv->data_from, desc_from.type);
 	return err;
 }
 

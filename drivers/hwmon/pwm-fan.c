@@ -18,19 +18,31 @@
 
 #include <linux/hwmon.h>
 #include <linux/hwmon-sysfs.h>
+#include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pwm.h>
+#include <linux/regulator/consumer.h>
 #include <linux/sysfs.h>
 #include <linux/thermal.h>
+#include <linux/timer.h>
 
 #define MAX_PWM 255
 
 struct pwm_fan_ctx {
 	struct mutex lock;
 	struct pwm_device *pwm;
+	struct regulator *reg_en;
+
+	int irq;
+	atomic_t pulses;
+	unsigned int rpm;
+	u8 pulses_per_revolution;
+	ktime_t sample_start;
+	struct timer_list rpm_timer;
+
 	unsigned int pwm_value;
 	unsigned int pwm_fan_state;
 	unsigned int pwm_fan_max_state;
@@ -38,33 +50,50 @@ struct pwm_fan_ctx {
 	struct thermal_cooling_device *cdev;
 };
 
+/* This handler assumes self resetting edge triggered interrupt. */
+static irqreturn_t pulse_handler(int irq, void *dev_id)
+{
+	struct pwm_fan_ctx *ctx = dev_id;
+
+	atomic_inc(&ctx->pulses);
+
+	return IRQ_HANDLED;
+}
+
+static void sample_timer(struct timer_list *t)
+{
+	struct pwm_fan_ctx *ctx = from_timer(ctx, t, rpm_timer);
+	int pulses;
+	u64 tmp;
+
+	pulses = atomic_read(&ctx->pulses);
+	atomic_sub(pulses, &ctx->pulses);
+	tmp = (u64)pulses * ktime_ms_delta(ktime_get(), ctx->sample_start) * 60;
+	do_div(tmp, ctx->pulses_per_revolution * 1000);
+	ctx->rpm = tmp;
+
+	ctx->sample_start = ktime_get();
+	mod_timer(&ctx->rpm_timer, jiffies + HZ);
+}
+
 static int  __set_pwm(struct pwm_fan_ctx *ctx, unsigned long pwm)
 {
-	struct pwm_args pargs;
-	unsigned long duty;
+	unsigned long period;
 	int ret = 0;
-
-	pwm_get_args(ctx->pwm, &pargs);
+	struct pwm_state state = { };
 
 	mutex_lock(&ctx->lock);
 	if (ctx->pwm_value == pwm)
 		goto exit_set_pwm_err;
 
-	duty = DIV_ROUND_UP(pwm * (pargs.period - 1), MAX_PWM);
-	ret = pwm_config(ctx->pwm, duty, pargs.period);
-	if (ret)
-		goto exit_set_pwm_err;
+	pwm_init_state(ctx->pwm, &state);
+	period = ctx->pwm->args.period;
+	state.duty_cycle = DIV_ROUND_UP(pwm * (period - 1), MAX_PWM);
+	state.enabled = pwm ? true : false;
 
-	if (pwm == 0)
-		pwm_disable(ctx->pwm);
-
-	if (ctx->pwm_value == 0) {
-		ret = pwm_enable(ctx->pwm);
-		if (ret)
-			goto exit_set_pwm_err;
-	}
-
-	ctx->pwm_value = pwm;
+	ret = pwm_apply_state(ctx->pwm, &state);
+	if (!ret)
+		ctx->pwm_value = pwm;
 exit_set_pwm_err:
 	mutex_unlock(&ctx->lock);
 	return ret;
@@ -81,8 +110,8 @@ static void pwm_fan_update_state(struct pwm_fan_ctx *ctx, unsigned long pwm)
 	ctx->pwm_fan_state = i;
 }
 
-static ssize_t set_pwm(struct device *dev, struct device_attribute *attr,
-		       const char *buf, size_t count)
+static ssize_t pwm_store(struct device *dev, struct device_attribute *attr,
+			 const char *buf, size_t count)
 {
 	struct pwm_fan_ctx *ctx = dev_get_drvdata(dev);
 	unsigned long pwm;
@@ -99,23 +128,53 @@ static ssize_t set_pwm(struct device *dev, struct device_attribute *attr,
 	return count;
 }
 
-static ssize_t show_pwm(struct device *dev,
-			struct device_attribute *attr, char *buf)
+static ssize_t pwm_show(struct device *dev, struct device_attribute *attr,
+			char *buf)
 {
 	struct pwm_fan_ctx *ctx = dev_get_drvdata(dev);
 
 	return sprintf(buf, "%u\n", ctx->pwm_value);
 }
 
+static ssize_t rpm_show(struct device *dev,
+			struct device_attribute *attr, char *buf)
+{
+	struct pwm_fan_ctx *ctx = dev_get_drvdata(dev);
 
-static SENSOR_DEVICE_ATTR(pwm1, S_IRUGO | S_IWUSR, show_pwm, set_pwm, 0);
+	return sprintf(buf, "%u\n", ctx->rpm);
+}
+
+static SENSOR_DEVICE_ATTR_RW(pwm1, pwm, 0);
+static SENSOR_DEVICE_ATTR_RO(fan1_input, rpm, 0);
 
 static struct attribute *pwm_fan_attrs[] = {
 	&sensor_dev_attr_pwm1.dev_attr.attr,
+	&sensor_dev_attr_fan1_input.dev_attr.attr,
 	NULL,
 };
 
-ATTRIBUTE_GROUPS(pwm_fan);
+static umode_t pwm_fan_attrs_visible(struct kobject *kobj, struct attribute *a,
+				     int n)
+{
+	struct device *dev = container_of(kobj, struct device, kobj);
+	struct pwm_fan_ctx *ctx = dev_get_drvdata(dev);
+
+	/* Hide fan_input in case no interrupt is available  */
+	if (n == 1 && ctx->irq <= 0)
+		return 0;
+
+	return a->mode;
+}
+
+static const struct attribute_group pwm_fan_group = {
+	.attrs = pwm_fan_attrs,
+	.is_visible = pwm_fan_attrs_visible,
+};
+
+static const struct attribute_group *pwm_fan_groups[] = {
+	&pwm_fan_group,
+	NULL,
+};
 
 /* thermal cooling device callbacks */
 static int pwm_fan_get_max_state(struct thermal_cooling_device *cdev,
@@ -189,7 +248,7 @@ static int pwm_fan_of_get_cooling_data(struct device *dev,
 	}
 
 	num = ret;
-	ctx->pwm_fan_cooling_levels = devm_kzalloc(dev, num * sizeof(u32),
+	ctx->pwm_fan_cooling_levels = devm_kcalloc(dev, num, sizeof(u32),
 						   GFP_KERNEL);
 	if (!ctx->pwm_fan_cooling_levels)
 		return -ENOMEM;
@@ -218,10 +277,10 @@ static int pwm_fan_probe(struct platform_device *pdev)
 {
 	struct thermal_cooling_device *cdev;
 	struct pwm_fan_ctx *ctx;
-	struct pwm_args pargs;
 	struct device *hwmon;
-	int duty_cycle;
 	int ret;
+	struct pwm_state state = { };
+	u32 ppr = 2;
 
 	ctx = devm_kzalloc(&pdev->dev, sizeof(*ctx), GFP_KERNEL);
 	if (!ctx)
@@ -231,48 +290,82 @@ static int pwm_fan_probe(struct platform_device *pdev)
 
 	ctx->pwm = devm_of_pwm_get(&pdev->dev, pdev->dev.of_node, NULL);
 	if (IS_ERR(ctx->pwm)) {
-		dev_err(&pdev->dev, "Could not get PWM\n");
-		return PTR_ERR(ctx->pwm);
+		ret = PTR_ERR(ctx->pwm);
+
+		if (ret != -EPROBE_DEFER)
+			dev_err(&pdev->dev, "Could not get PWM: %d\n", ret);
+
+		return ret;
 	}
 
 	platform_set_drvdata(pdev, ctx);
 
-	/*
-	 * FIXME: pwm_apply_args() should be removed when switching to the
-	 * atomic PWM API.
-	 */
-	pwm_apply_args(ctx->pwm);
+	ctx->irq = platform_get_irq(pdev, 0);
+	if (ctx->irq == -EPROBE_DEFER)
+		return ctx->irq;
 
-	/* Set duty cycle to maximum allowed */
-	pwm_get_args(ctx->pwm, &pargs);
+	ctx->reg_en = devm_regulator_get_optional(&pdev->dev, "fan");
+	if (IS_ERR(ctx->reg_en)) {
+		if (PTR_ERR(ctx->reg_en) != -ENODEV)
+			return PTR_ERR(ctx->reg_en);
 
-	duty_cycle = pargs.period - 1;
-	ctx->pwm_value = MAX_PWM;
-
-	ret = pwm_config(ctx->pwm, duty_cycle, pargs.period);
-	if (ret) {
-		dev_err(&pdev->dev, "Failed to configure PWM\n");
-		return ret;
+		ctx->reg_en = NULL;
+	} else {
+		ret = regulator_enable(ctx->reg_en);
+		if (ret) {
+			dev_err(&pdev->dev,
+				"Failed to enable fan supply: %d\n", ret);
+			return ret;
+		}
 	}
 
-	/* Enbale PWM output */
-	ret = pwm_enable(ctx->pwm);
+	ctx->pwm_value = MAX_PWM;
+
+	/* Set duty cycle to maximum allowed and enable PWM output */
+	pwm_init_state(ctx->pwm, &state);
+	state.duty_cycle = ctx->pwm->args.period - 1;
+	state.enabled = true;
+
+	ret = pwm_apply_state(ctx->pwm, &state);
 	if (ret) {
-		dev_err(&pdev->dev, "Failed to enable PWM\n");
-		return ret;
+		dev_err(&pdev->dev, "Failed to configure PWM: %d\n", ret);
+		goto err_reg_disable;
+	}
+
+	timer_setup(&ctx->rpm_timer, sample_timer, 0);
+
+	of_property_read_u32(pdev->dev.of_node, "pulses-per-revolution", &ppr);
+	ctx->pulses_per_revolution = ppr;
+	if (!ctx->pulses_per_revolution) {
+		dev_err(&pdev->dev, "pulses-per-revolution can't be zero.\n");
+		ret = -EINVAL;
+		goto err_pwm_disable;
+	}
+
+	if (ctx->irq > 0) {
+		ret = devm_request_irq(&pdev->dev, ctx->irq, pulse_handler, 0,
+				       pdev->name, ctx);
+		if (ret) {
+			dev_err(&pdev->dev,
+				"Failed to request interrupt: %d\n", ret);
+			goto err_pwm_disable;
+		}
+		ctx->sample_start = ktime_get();
+		mod_timer(&ctx->rpm_timer, jiffies + HZ);
 	}
 
 	hwmon = devm_hwmon_device_register_with_groups(&pdev->dev, "pwmfan",
 						       ctx, pwm_fan_groups);
 	if (IS_ERR(hwmon)) {
-		dev_err(&pdev->dev, "Failed to register hwmon device\n");
-		pwm_disable(ctx->pwm);
-		return PTR_ERR(hwmon);
+		ret = PTR_ERR(hwmon);
+		dev_err(&pdev->dev,
+			"Failed to register hwmon device: %d\n", ret);
+		goto err_del_timer;
 	}
 
 	ret = pwm_fan_of_get_cooling_data(&pdev->dev, ctx);
 	if (ret)
-		return ret;
+		goto err_del_timer;
 
 	ctx->pwm_fan_state = ctx->pwm_fan_max_state;
 	if (IS_ENABLED(CONFIG_THERMAL)) {
@@ -280,16 +373,30 @@ static int pwm_fan_probe(struct platform_device *pdev)
 							  "pwm-fan", ctx,
 							  &pwm_fan_cooling_ops);
 		if (IS_ERR(cdev)) {
+			ret = PTR_ERR(cdev);
 			dev_err(&pdev->dev,
-				"Failed to register pwm-fan as cooling device");
-			pwm_disable(ctx->pwm);
-			return PTR_ERR(cdev);
+				"Failed to register pwm-fan as cooling device: %d\n",
+				ret);
+			goto err_del_timer;
 		}
 		ctx->cdev = cdev;
 		thermal_cdev_update(cdev);
 	}
 
 	return 0;
+
+err_del_timer:
+	del_timer_sync(&ctx->rpm_timer);
+
+err_pwm_disable:
+	state.enabled = false;
+	pwm_apply_state(ctx->pwm, &state);
+
+err_reg_disable:
+	if (ctx->reg_en)
+		regulator_disable(ctx->reg_en);
+
+	return ret;
 }
 
 static int pwm_fan_remove(struct platform_device *pdev)
@@ -297,8 +404,14 @@ static int pwm_fan_remove(struct platform_device *pdev)
 	struct pwm_fan_ctx *ctx = platform_get_drvdata(pdev);
 
 	thermal_cooling_device_unregister(ctx->cdev);
+	del_timer_sync(&ctx->rpm_timer);
+
 	if (ctx->pwm_value)
 		pwm_disable(ctx->pwm);
+
+	if (ctx->reg_en)
+		regulator_disable(ctx->reg_en);
+
 	return 0;
 }
 
@@ -306,9 +419,27 @@ static int pwm_fan_remove(struct platform_device *pdev)
 static int pwm_fan_suspend(struct device *dev)
 {
 	struct pwm_fan_ctx *ctx = dev_get_drvdata(dev);
+	struct pwm_args args;
+	int ret;
 
-	if (ctx->pwm_value)
+	pwm_get_args(ctx->pwm, &args);
+
+	if (ctx->pwm_value) {
+		ret = pwm_config(ctx->pwm, 0, args.period);
+		if (ret < 0)
+			return ret;
+
 		pwm_disable(ctx->pwm);
+	}
+
+	if (ctx->reg_en) {
+		ret = regulator_disable(ctx->reg_en);
+		if (ret) {
+			dev_err(dev, "Failed to disable fan supply: %d\n", ret);
+			return ret;
+		}
+	}
+
 	return 0;
 }
 
@@ -318,6 +449,14 @@ static int pwm_fan_resume(struct device *dev)
 	struct pwm_args pargs;
 	unsigned long duty;
 	int ret;
+
+	if (ctx->reg_en) {
+		ret = regulator_enable(ctx->reg_en);
+		if (ret) {
+			dev_err(dev, "Failed to enable fan supply: %d\n", ret);
+			return ret;
+		}
+	}
 
 	if (ctx->pwm_value == 0)
 		return 0;

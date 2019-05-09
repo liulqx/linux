@@ -139,6 +139,8 @@ enum fc_vport_state {
 #define FC_PORTSPEED_50GBIT		0x200
 #define FC_PORTSPEED_100GBIT		0x400
 #define FC_PORTSPEED_25GBIT		0x800
+#define FC_PORTSPEED_64GBIT		0x1000
+#define FC_PORTSPEED_128GBIT		0x2000
 #define FC_PORTSPEED_NOT_NEGOTIATED	(1 << 15) /* Speed not established */
 
 /*
@@ -162,6 +164,10 @@ enum fc_tgtid_binding_type  {
 #define FC_PORT_ROLE_FCP_TARGET			0x01
 #define FC_PORT_ROLE_FCP_INITIATOR		0x02
 #define FC_PORT_ROLE_IP_PORT			0x04
+#define FC_PORT_ROLE_FCP_DUMMY_INITIATOR	0x08
+#define FC_PORT_ROLE_NVME_INITIATOR		0x10
+#define FC_PORT_ROLE_NVME_TARGET		0x20
+#define FC_PORT_ROLE_NVME_DISCOVERY		0x40
 
 /* The following are for compatibility */
 #define FC_RPORT_ROLE_UNKNOWN			FC_PORT_ROLE_UNKNOWN
@@ -470,6 +476,7 @@ enum fc_host_event_code  {
 	FCH_EVT_PORT_ONLINE		= 0x202,
 	FCH_EVT_PORT_FABRIC		= 0x204,
 	FCH_EVT_LINK_UNKNOWN		= 0x500,
+	FCH_EVT_LINK_FPIN		= 0x501,
 	FCH_EVT_VENDOR_UNIQUE		= 0xffff,
 };
 
@@ -657,10 +664,6 @@ struct fc_function_template {
 	int	(*vport_disable)(struct fc_vport *, bool);
 	int  	(*vport_delete)(struct fc_vport *);
 
-	/* target-mode drivers' functions */
-	int     (* tsk_mgmt_response)(struct Scsi_Host *, u64, u64, int);
-	int     (* it_nexus_response)(struct Scsi_Host *, u64, int);
-
 	/* bsg support */
 	int	(*bsg_request)(struct bsg_job *);
 	int	(*bsg_timeout)(struct bsg_job *);
@@ -756,7 +759,7 @@ fc_remote_port_chkready(struct fc_rport *rport)
 	return result;
 }
 
-static inline u64 wwn_to_u64(u8 *wwn)
+static inline u64 wwn_to_u64(const u8 *wwn)
 {
 	return get_unaligned_be64(wwn);
 }
@@ -799,15 +802,23 @@ u32 fc_get_event_number(void);
 void fc_host_post_event(struct Scsi_Host *shost, u32 event_number,
 		enum fc_host_event_code event_code, u32 event_data);
 void fc_host_post_vendor_event(struct Scsi_Host *shost, u32 event_number,
-		u32 data_len, char * data_buf, u64 vendor_id);
+		u32 data_len, char *data_buf, u64 vendor_id);
+void fc_host_post_fc_event(struct Scsi_Host *shost, u32 event_number,
+		enum fc_host_event_code event_code,
+		u32 data_len, char *data_buf, u64 vendor_id);
 	/* Note: when specifying vendor_id to fc_host_post_vendor_event()
-	 *   be sure to read the Vendor Type and ID formatting requirements
-	 *   specified in scsi_netlink.h
+	 *   or fc_host_post_fc_event(), be sure to read the Vendor Type
+	 *   and ID formatting requirements specified in scsi_netlink.h
+	 * Note: when calling fc_host_post_fc_event(), vendor_id may be
+	 *   specified as 0.
 	 */
+void fc_host_fpin_rcv(struct Scsi_Host *shost, u32 fpin_len, char *fpin_buf);
 struct fc_vport *fc_vport_create(struct Scsi_Host *shost, int channel,
 		struct fc_vport_identifiers *);
 int fc_vport_terminate(struct fc_vport *vport);
+int fc_block_rport(struct fc_rport *rport);
 int fc_block_scsi_eh(struct scsi_cmnd *cmnd);
+enum blk_eh_timer_return fc_eh_timed_out(struct scsi_cmnd *scmd);
 
 static inline struct Scsi_Host *fc_bsg_to_shost(struct bsg_job *job)
 {

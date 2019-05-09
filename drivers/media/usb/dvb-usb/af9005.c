@@ -15,11 +15,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
- * see Documentation/dvb/README.dvb-usb for more information
+ * see Documentation/media/dvb-drivers/dvb-usb.rst for more information
  */
 #include "af9005.h"
 
@@ -849,7 +845,7 @@ static int af9005_rc_query(struct dvb_usb_device *d, u32 * event, int *state)
 
 	/* deb_info("rc_query\n"); */
 	st->data[0] = 3;		/* rest of packet length low */
-	st->data[1] = 0;		/* rest of packet lentgh high */
+	st->data[1] = 0;		/* rest of packet length high */
 	st->data[2] = 0x40;		/* read remote */
 	st->data[3] = 1;		/* rest of packet length */
 	st->data[4] = seq = st->sequence++;	/* sequence number */

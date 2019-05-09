@@ -70,9 +70,9 @@ nft_payload_copy_vlan(u32 *d, const struct sk_buff *skb, u8 offset, u8 len)
 	return skb_copy_bits(skb, offset + mac_off, dst_u8, len) == 0;
 }
 
-static void nft_payload_eval(const struct nft_expr *expr,
-			     struct nft_regs *regs,
-			     const struct nft_pktinfo *pkt)
+void nft_payload_eval(const struct nft_expr *expr,
+		      struct nft_regs *regs,
+		      const struct nft_pktinfo *pkt)
 {
 	const struct nft_payload *priv = nft_expr_priv(expr);
 	const struct sk_buff *skb = pkt->skb;
@@ -184,7 +184,7 @@ static bool nft_payload_udp_checksum(struct sk_buff *skb, unsigned int thoff)
 	if (!uh)
 		return false;
 
-	return uh->check;
+	return (__force bool)uh->check;
 }
 
 static int nft_payload_l4csum_offset(const struct nft_pktinfo *pkt,
@@ -250,6 +250,22 @@ static int nft_payload_l4csum_update(const struct nft_pktinfo *pkt,
 	return 0;
 }
 
+static int nft_payload_csum_inet(struct sk_buff *skb, const u32 *src,
+				 __wsum fsum, __wsum tsum, int csum_offset)
+{
+	__sum16 sum;
+
+	if (skb_copy_bits(skb, csum_offset, &sum, sizeof(sum)) < 0)
+		return -1;
+
+	nft_csum_replace(&sum, fsum, tsum);
+	if (!skb_make_writable(skb, csum_offset + sizeof(sum)) ||
+	    skb_store_bits(skb, csum_offset, &sum, sizeof(sum)) < 0)
+		return -1;
+
+	return 0;
+}
+
 static void nft_payload_set_eval(const struct nft_expr *expr,
 				 struct nft_regs *regs,
 				 const struct nft_pktinfo *pkt)
@@ -259,7 +275,6 @@ static void nft_payload_set_eval(const struct nft_expr *expr,
 	const u32 *src = &regs->data[priv->sreg];
 	int offset, csum_offset;
 	__wsum fsum, tsum;
-	__sum16 sum;
 
 	switch (priv->base) {
 	case NFT_PAYLOAD_LL_HEADER:
@@ -282,18 +297,14 @@ static void nft_payload_set_eval(const struct nft_expr *expr,
 	csum_offset = offset + priv->csum_offset;
 	offset += priv->offset;
 
-	if (priv->csum_type == NFT_PAYLOAD_CSUM_INET &&
+	if ((priv->csum_type == NFT_PAYLOAD_CSUM_INET || priv->csum_flags) &&
 	    (priv->base != NFT_PAYLOAD_TRANSPORT_HEADER ||
 	     skb->ip_summed != CHECKSUM_PARTIAL)) {
-		if (skb_copy_bits(skb, csum_offset, &sum, sizeof(sum)) < 0)
-			goto err;
-
 		fsum = skb_checksum(skb, offset, priv->len, 0);
 		tsum = csum_partial(src, priv->len, 0);
-		nft_csum_replace(&sum, fsum, tsum);
 
-		if (!skb_make_writable(skb, csum_offset + sizeof(sum)) ||
-		    skb_store_bits(skb, csum_offset, &sum, sizeof(sum)) < 0)
+		if (priv->csum_type == NFT_PAYLOAD_CSUM_INET &&
+		    nft_payload_csum_inet(skb, src, fsum, tsum, csum_offset))
 			goto err;
 
 		if (priv->csum_flags &&

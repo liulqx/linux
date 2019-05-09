@@ -251,7 +251,7 @@ static void nb8800_receive(struct net_device *dev, unsigned int i,
 
 	if (len <= RX_COPYBREAK) {
 		dma_sync_single_for_cpu(&dev->dev, dma, len, DMA_FROM_DEVICE);
-		memcpy(skb_put(skb, len), data, len);
+		skb_put_data(skb, data, len);
 		dma_sync_single_for_device(&dev->dev, dma, len,
 					   DMA_FROM_DEVICE);
 	} else {
@@ -264,7 +264,7 @@ static void nb8800_receive(struct net_device *dev, unsigned int i,
 		}
 
 		dma_unmap_page(&dev->dev, dma, RX_BUF_SIZE, DMA_FROM_DEVICE);
-		memcpy(skb_put(skb, RX_COPYHDR), data, RX_COPYHDR);
+		skb_put_data(skb, data, RX_COPYHDR);
 		skb_add_rx_frag(skb, skb_shinfo(skb)->nr_frags, page,
 				offset + RX_COPYHDR, len - RX_COPYHDR,
 				RX_BUF_SIZE);
@@ -304,12 +304,10 @@ static int nb8800_poll(struct napi_struct *napi, int budget)
 
 again:
 	do {
-		struct nb8800_rx_buf *rxb;
 		unsigned int len;
 
 		next = (last + 1) % RX_DESC_COUNT;
 
-		rxb = &priv->rx_bufs[next];
 		rxd = &priv->rx_descs[next];
 
 		if (!rxd->report)
@@ -406,6 +404,7 @@ static int nb8800_xmit(struct sk_buff *skb, struct net_device *dev)
 	unsigned int dma_len;
 	unsigned int align;
 	unsigned int next;
+	bool xmit_more;
 
 	if (atomic_read(&priv->tx_free) <= NB8800_DESC_LOW) {
 		netif_stop_queue(dev);
@@ -425,9 +424,10 @@ static int nb8800_xmit(struct sk_buff *skb, struct net_device *dev)
 		return NETDEV_TX_OK;
 	}
 
+	xmit_more = netdev_xmit_more();
 	if (atomic_dec_return(&priv->tx_free) <= NB8800_DESC_LOW) {
 		netif_stop_queue(dev);
-		skb->xmit_more = 0;
+		xmit_more = false;
 	}
 
 	next = priv->tx_next;
@@ -452,7 +452,7 @@ static int nb8800_xmit(struct sk_buff *skb, struct net_device *dev)
 	desc->n_addr = priv->tx_bufs[next].dma_desc;
 	desc->config = DESC_BTS(2) | DESC_DS | DESC_EOF | dma_len;
 
-	if (!skb->xmit_more)
+	if (!xmit_more)
 		desc->config |= DESC_EOC;
 
 	txb->skb = skb;
@@ -470,7 +470,7 @@ static int nb8800_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	priv->tx_next = next;
 
-	if (!skb->xmit_more) {
+	if (!xmit_more) {
 		smp_wmb();
 		priv->tx_chain->ready = true;
 		priv->tx_chain = NULL;
@@ -609,7 +609,7 @@ static void nb8800_mac_config(struct net_device *dev)
 		mac_mode |= HALF_DUPLEX;
 
 	if (gigabit) {
-		if (priv->phy_mode == PHY_INTERFACE_MODE_RGMII)
+		if (phy_interface_is_rgmii(dev->phydev))
 			mac_mode |= RGMII_MODE;
 
 		mac_mode |= GMAC_MODE;
@@ -937,18 +937,11 @@ static void nb8800_pause_adv(struct net_device *dev)
 {
 	struct nb8800_priv *priv = netdev_priv(dev);
 	struct phy_device *phydev = dev->phydev;
-	u32 adv = 0;
 
 	if (!phydev)
 		return;
 
-	if (priv->pause_rx)
-		adv |= ADVERTISED_Pause | ADVERTISED_Asym_Pause;
-	if (priv->pause_tx)
-		adv ^= ADVERTISED_Asym_Pause;
-
-	phydev->supported |= adv;
-	phydev->advertising |= adv;
+	phy_set_asym_pause(phydev, priv->pause_rx, priv->pause_tx);
 }
 
 static int nb8800_open(struct net_device *dev)
@@ -1268,11 +1261,10 @@ static int nb8800_tangox_init(struct net_device *dev)
 		break;
 
 	case PHY_INTERFACE_MODE_RGMII:
-		pad_mode = PAD_MODE_RGMII;
-		break;
-
+	case PHY_INTERFACE_MODE_RGMII_ID:
+	case PHY_INTERFACE_MODE_RGMII_RXID:
 	case PHY_INTERFACE_MODE_RGMII_TXID:
-		pad_mode = PAD_MODE_RGMII | PAD_MODE_GTX_CLK_DELAY;
+		pad_mode = PAD_MODE_RGMII;
 		break;
 
 	default:
@@ -1471,7 +1463,7 @@ static int nb8800_probe(struct platform_device *pdev)
 	dev->irq = irq;
 
 	mac = of_get_mac_address(pdev->dev.of_node);
-	if (mac)
+	if (!IS_ERR(mac))
 		ether_addr_copy(dev->dev_addr, mac);
 
 	if (!is_valid_ether_addr(dev->dev_addr))

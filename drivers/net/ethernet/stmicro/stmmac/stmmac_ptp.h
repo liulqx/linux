@@ -12,10 +12,6 @@
   FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
   more details.
 
-  You should have received a copy of the GNU General Public License along with
-  this program; if not, write to the Free Software Foundation, Inc.,
-  51 Franklin St - Fifth Floor, Boston, MA 02110-1301 USA.
-
   The full GNU General Public License is included in this distribution in
   the file called "COPYING".
 
@@ -25,6 +21,7 @@
 #ifndef	__STMMAC_PTP_H__
 #define	__STMMAC_PTP_H__
 
+#define PTP_XGMAC_OFFSET	0xd00
 #define	PTP_GMAC4_OFFSET	0xb00
 #define	PTP_GMAC3_X_OFFSET	0x700
 
@@ -62,8 +59,14 @@
 #define	PTP_TCR_TSEVNTENA	BIT(14)
 /* Enable Snapshot for Messages Relevant to Master */
 #define	PTP_TCR_TSMSTRENA	BIT(15)
-/* Select PTP packets for Taking Snapshots */
-#define	PTP_TCR_SNAPTYPSEL_1	GENMASK(17, 16)
+/* Select PTP packets for Taking Snapshots
+ * On gmac4 specifically:
+ * Enable SYNC, Pdelay_Req, Pdelay_Resp when TSEVNTENA is enabled.
+ * or
+ * Enable  SYNC, Follow_Up, Delay_Req, Delay_Resp, Pdelay_Req, Pdelay_Resp,
+ * Pdelay_Resp_Follow_Up if TSEVNTENA is disabled
+ */
+#define	PTP_TCR_SNAPTYPSEL_1	BIT(16)
 /* Enable MAC address for PTP Frame Filtering */
 #define	PTP_TCR_TSENMACADDR	BIT(18)
 

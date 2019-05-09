@@ -61,7 +61,7 @@ static const char hw_stat_gstrings[][ETH_GSTRING_LEN] = {
 static const char tx_fw_stat_gstrings[][ETH_GSTRING_LEN] = {
 	"tx-single-collision",
 	"tx-multiple-collision",
-	"tx-late-collsion",
+	"tx-late-collision",
 	"tx-aborted-frames",
 	"tx-lost-frames",
 	"tx-carrier-sense-errors",
@@ -113,7 +113,9 @@ uec_get_ksettings(struct net_device *netdev, struct ethtool_link_ksettings *cmd)
 	if (!phydev)
 		return -ENODEV;
 
-	return phy_ethtool_ksettings_get(phydev, cmd);
+	phy_ethtool_ksettings_get(phydev, cmd);
+
+	return 0;
 }
 
 static int
@@ -250,13 +252,11 @@ uec_set_ringparam(struct net_device *netdev,
 		return -EINVAL;
 	}
 
+	if (netif_running(netdev))
+		return -EBUSY;
+
 	ug_info->bdRingLenRx[queue] = ring->rx_pending;
 	ug_info->bdRingLenTx[queue] = ring->tx_pending;
-
-	if (netif_running(netdev)) {
-		/* FIXME: restart automatically */
-		netdev_info(netdev, "Please re-open the interface\n");
-	}
 
 	return ret;
 }

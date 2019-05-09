@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0 */
 /*    Kernel link layout for various "sections"
  *
  *    Copyright (C) 1999-2003 Matthew Wilcox <willy at parisc-linux.org>
@@ -16,6 +17,9 @@
 #define BSS_FIRST_SECTIONS	*(.data..vm0.pmd) \
 				*(.data..vm0.pgd) \
 				*(.data..vm0.pte)
+
+/* No __ro_after_init data in the .rodata section - which will always be ro */
+#define RO_AFTER_INIT_DATA
 
 #include <asm-generic/vmlinux.lds.h>
 
@@ -60,6 +64,12 @@ SECTIONS
 		EXIT_DATA
 	}
 	PERCPU_SECTION(8)
+	. = ALIGN(4);
+	.altinstructions : {
+		__alt_instructions = .;
+		*(.altinstructions)
+		__alt_instructions_end = .;
+	}
 	. = ALIGN(HUGEPAGE_SIZE);
 	__init_end = .;
 	/* freed after init ends here */
@@ -78,6 +88,8 @@ SECTIONS
 		*(.text.sys_exit)
 		*(.text.do_sigaltstack)
 		*(.text.do_fork)
+		*(.text.div)
+		*($$*)			/* millicode routines */
 		*(.text.*)
 		*(.fixup)
 		*(.lock.text)		/* out-of-line lock text */
@@ -97,7 +109,9 @@ SECTIONS
 	. = ALIGN(16);
 	/* Linkage tables */
 	.opd : {
+		__start_opd = .;
 		*(.opd)
+		__end_opd = .;
 	} PROVIDE (__gp = .);
 	.plt : {
 		*(.plt)

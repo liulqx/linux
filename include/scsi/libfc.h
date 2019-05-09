@@ -23,6 +23,7 @@
 #include <linux/timer.h>
 #include <linux/if.h>
 #include <linux/percpu.h>
+#include <linux/refcount.h>
 
 #include <scsi/scsi_transport.h>
 #include <scsi/scsi_transport_fc.h>
@@ -321,7 +322,7 @@ struct fc_seq_els_data {
  */
 struct fc_fcp_pkt {
 	spinlock_t	  scsi_pkt_lock;
-	atomic_t	  ref_cnt;
+	refcount_t	  ref_cnt;
 
 	/* SCSI command and data transfer information */
 	u32		  data_len;
@@ -809,11 +810,11 @@ static inline void fc_set_wwnn(struct fc_lport *lport, u64 wwnn)
 /**
  * fc_set_wwpn() - Set the World Wide Port Name of a local port
  * @lport: The local port whose WWPN is to be set
- * @wwnn:  The new WWPN
+ * @wwpn:  The new WWPN
  */
-static inline void fc_set_wwpn(struct fc_lport *lport, u64 wwnn)
+static inline void fc_set_wwpn(struct fc_lport *lport, u64 wwpn)
 {
-	lport->wwpn = wwnn;
+	lport->wwpn = wwpn;
 }
 
 /**
